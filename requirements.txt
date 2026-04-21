@@ -1,6 +1,10 @@
 fastapi==0.115.0
-uvicorn==0.32.0
+uvicorn[standard]==0.32.0
 pillow
-transformers
-torch --index-url https://download.pytorch.org/whl/cpu
 python-multipart
+
+transformers==4.41.2
+
+torch==2.0.1+cpu
+torchvision==0.15.2+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
