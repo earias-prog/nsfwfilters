@@ -12,8 +12,7 @@ from transformers import pipeline
 app = FastAPI()
 classifier = pipeline(
     "image-classification",
-    model="Falconsai/nsfw_image_detection",
-    token=os.environ["HUGGINGFACE_TOKEN"]
+    model="Falconsai/nsfw_image_detection"
 )
 
 NSFW_THRESHOLD = 0.5
