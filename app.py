@@ -7,7 +7,6 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from transformers import pipeline
-from fastapi.middleware.cors import CORSMiddleware
 import anthropic
 
 app = FastAPI()
