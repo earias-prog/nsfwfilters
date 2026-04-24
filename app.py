@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from transformers import pipeline
+from fastapi.middleware.cors import CORSMiddleware
 import anthropic
 
 app = FastAPI()
@@ -27,6 +28,8 @@ allowed_origins = [
     "http://127.0.0.1:8081",
     "http://localhost:19006",
     "http://127.0.0.1:19006",
+    "http://192.168.4.59:8081",
+    "https://nsfwfilters-production.up.railway.app",
 ]
 app.add_middleware(
     CORSMiddleware,
