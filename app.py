@@ -173,7 +173,7 @@ Rules:
 
         # Call Claude
         response = client.messages.create(
-            model="claude-3-haiku-20240307",  # fast + cheap
+            model="claude-sonnet-4-6",  # fast + cheap
             max_tokens=400,
             temperature=0.3,
             messages=[
