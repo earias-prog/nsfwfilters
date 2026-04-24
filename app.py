@@ -31,10 +31,15 @@ allowed_origins = [
     "http://192.168.4.59:8081",
     "https://nsfwfilters-production.up.railway.app",
 ]
+# --------------------------------------------------
+# CORS (FIXED VERSION)
+# KEYWORD: CORS
+# --------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],   # <-- IMPORTANT: allow all for now
+    allow_credentials=False,  # <-- MUST be False when using "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
