@@ -7,7 +7,16 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from transformers import pipeline
+import anthropic
+
 app = FastAPI()
+
+
+# Initialize Claude client
+client = anthropic.Anthropic(
+    api_key=os.getenv("ANTHROPIC_API_KEY")
+)
+
 # --------------------------------------------------
 # CORS
 # KEYWORD: CORS
@@ -43,6 +52,20 @@ class ModerationResponse(BaseModel):
     blocked: bool
     flagged_files: Optional[List[FlaggedFile]] = None
     message: Optional[str] = None
+
+# Request model
+class OBDRequest(BaseModel):
+    query: str  # can be "P0303" or full sentence
+
+# Response model (optional but cleaner)
+class OBDResponse(BaseModel):
+    code: str
+    summary: str
+    potential_causes: list[str]
+    potential_fixes: list[str]
+    recommended_parts: list[str]
+    disclaimer: str
+    
 @app.get("/")
 def root():
     return {"ok": True, "message": "NSFW moderation API is running."}
@@ -106,3 +129,68 @@ async def upload_images(files: List[UploadFile] = File(...)):
             else "All images passed moderation."
         ),
     )
+
+@app.post("/obd/explain", response_model=OBDResponse)
+async def explain_obd(req: OBDRequest):
+    try:
+        user_input = req.query.strip()
+
+        if not user_input:
+            raise HTTPException(status_code=400, detail="Empty query")
+
+        # Strong system-style prompt
+        prompt = f"""
+You are an experienced automotive mechanic.
+
+A user provided the following OBD code or issue:
+"{user_input}"
+
+Your job:
+- Explain it simply
+- Provide only GENERAL guidance
+- DO NOT guarantee fixes
+- DO NOT say anything unsafe
+- DO NOT give professional or legal advice
+- Always assume uncertainty
+
+Return ONLY JSON in this exact format:
+
+{{
+  "code": "{user_input}",
+  "summary": "short explanation",
+  "potential_causes": ["cause1", "cause2"],
+  "potential_fixes": ["fix1", "fix2"],
+  "recommended_parts": ["part1", "part2"],
+  "disclaimer": "This is not professional mechanic advice."
+}}
+
+Rules:
+- Keep it concise
+- Use common car terms
+- No markdown
+- No extra text outside JSON
+"""
+
+        # Call Claude
+        response = client.messages.create(
+            model="claude-3-haiku-20240307",  # fast + cheap
+            max_tokens=400,
+            temperature=0.3,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        # Extract text
+        raw_output = response.content[0].text
+
+        # OPTIONAL: you can add JSON parsing here if needed
+        # but for MVP we return raw JSON string parsed by frontend or later
+
+        import json
+        parsed = json.loads(raw_output)
+
+        return parsed
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
