@@ -1,4 +1,5 @@
 import os
+import json, re
 import gc  # EDIT ADDED: import gc for explicit garbage collection
 from io import BytesIO
 from typing import List, Optional
@@ -145,7 +146,6 @@ async def explain_obd(req: OBDRequest):
         if not user_input:
             raise HTTPException(status_code=400, detail="Empty query")
 
-        # Strong system-style prompt
         prompt = f"""
 You are an experienced automotive mechanic.
 
@@ -178,25 +178,25 @@ Rules:
 - No extra text outside JSON
 """
 
-        # Call Claude
         response = client.messages.create(
-            model="claude-3-haiku-20240307",  # fast + cheap
+            model="claude-3-haiku-20240307",
             max_tokens=400,
             temperature=0.3,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+            messages=[{"role": "user", "content": prompt}]
         )
 
-        # Extract text
-        raw_output = response.content[0].text
+        raw_output = response.content[0].text.strip()
 
-        # OPTIONAL: you can add JSON parsing here if needed
-        # but for MVP we return raw JSON string parsed by frontend or later
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_output)
+        if fence_match:
+            raw_output = fence_match.group(1).strip()
+        else:
+            start = raw_output.find("{")
+            end = raw_output.rfind("}")
+            if start != -1 and end != -1:
+                raw_output = raw_output[start : end + 1]
 
-        import json
         parsed = json.loads(raw_output)
-
         return parsed
 
     except Exception as e:
