@@ -1,8 +1,12 @@
 import os
 import json, re
-import gc  # EDIT ADDED: import gc for explicit garbage collection
+import gc
 from io import BytesIO
 from typing import List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
 from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,25 +25,11 @@ client = anthropic.Anthropic(
 # --------------------------------------------------
 # CORS
 # KEYWORD: CORS
-# Allow your Expo web dev server + localhost variants
-# --------------------------------------------------
-allowed_origins = [
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",
-    "http://localhost:19006",
-    "http://127.0.0.1:19006",
-    "http://192.168.4.59:8081",
-    "https://nsfwfilters-production.up.railway.app",
-]
-
-# --------------------------------------------------
-# CORS (FIXED VERSION)
-# KEYWORD: CORS
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # <-- IMPORTANT: allow all for now
-    allow_credentials=False,  # <-- MUST be False when using "*"
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -68,14 +58,15 @@ class ModerationResponse(BaseModel):
     message: Optional[str] = None
 
 
-# Request model
 class OBDRequest(BaseModel):
-    query: str  # can be "P0303" or full sentence
+    query: str
 
 
-# Response model kept in file for reference/backward compatibility.
-# NOTE: The /obd/explain route no longer uses response_model=OBDResponse
-# because Claude may return arrays in slightly different shapes, so we normalize manually.
+class PlateLookupRequest(BaseModel):
+    plate: str
+    state: str
+
+
 class OBDResponse(BaseModel):
     code: str
     summary: str
@@ -86,20 +77,9 @@ class OBDResponse(BaseModel):
 
 
 # --------------------------------------------------
-# OBD RESPONSE NORMALIZER
-# KEYWORD: OBD_NORMALIZER
+# HELPERS
 # --------------------------------------------------
 def _flatten_to_strings(value) -> list[str]:
-    """
-    Coerce Claude's array fields into a flat list[str].
-
-    Handles:
-      - ["a", "b"]                        -> ["a", "b"]
-      - [{"cause": "a"}, {"cause": "b"}]  -> ["a", "b"]
-      - "a, b, c"                         -> ["a, b, c"]
-
-    Anything else becomes its string representation so the API does not crash.
-    """
     if value is None:
         return []
 
@@ -126,14 +106,128 @@ def _flatten_to_strings(value) -> list[str]:
     return out
 
 
+def _first_dict(value):
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+
+    return {}
+
+
+def _pick_vehicle_payload(data: dict):
+    vehicle = (
+        data.get("data")
+        or data.get("vehicle")
+        or data.get("attributes")
+        or data.get("result")
+        or data.get("results")
+        or data
+    )
+
+    return _first_dict(vehicle)
+
+
+def _get_first(vehicle: dict, *keys):
+    for key in keys:
+        value = vehicle.get(key)
+        if value is not None and str(value).strip():
+            return value
+    return None
+
+
 @app.get("/")
 def root():
-    return {"ok": True, "message": "NSFW moderation API is running."}
+    return {"ok": True, "message": "DiBuy backend API is running."}
 
 
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# --------------------------------------------------
+# LICENSE PLATE DECODER
+# KEYWORD: PLATE_DECODER
+# --------------------------------------------------
+@app.post("/decode-license-plate")
+def decode_license_plate(req: PlateLookupRequest):
+    plate = re.sub(r"[^A-Z0-9]", "", req.plate.upper())
+    state = req.state.strip().upper()
+
+    if not plate:
+        raise HTTPException(status_code=400, detail="Missing license plate.")
+
+    if not re.fullmatch(r"[A-Z]{2}", state):
+        raise HTTPException(status_code=400, detail="State must be a 2-letter code like CA.")
+
+    url_template = os.getenv("PLATE_LOOKUP_URL_TEMPLATE")
+    api_key = os.getenv("PLATE_LOOKUP_API_KEY")
+
+    if not url_template or not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Plate lookup is not configured on the server."
+        )
+
+    provider_url = url_template.format(
+        plate=quote(plate),
+        state=quote(state),
+        api_key=quote(api_key),
+    )
+
+    try:
+        request = Request(
+            provider_url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "DiBuy/1.0",
+            },
+        )
+
+        with urlopen(request, timeout=12) as response:
+            raw = response.read().decode("utf-8")
+
+        data = json.loads(raw)
+        vehicle = _pick_vehicle_payload(data)
+
+        return {
+            "vin": _get_first(vehicle, "vin", "VIN"),
+            "year": _get_first(vehicle, "year", "model_year", "ModelYear"),
+            "make": _get_first(vehicle, "make", "Make"),
+            "model": _get_first(vehicle, "model", "Model"),
+            "trim": _get_first(vehicle, "trim", "submodel", "sub_model", "style", "body", "Trim"),
+            "drivetrain": _get_first(vehicle, "drivetrain", "drive_type", "DriveType"),
+            "transmission": _get_first(vehicle, "transmission", "transmission_style", "TransmissionStyle"),
+            "vehicleType": _get_first(vehicle, "body_type", "body_style", "vehicle_type", "BodyClass"),
+            "cylinders": _get_first(vehicle, "cylinders", "engine_cylinders", "EngineCylinders"),
+        }
+
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:300]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Plate provider returned {exc.code}: {detail}"
+        )
+
+    except URLError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach plate provider: {str(exc)[:200]}"
+        )
+
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=502,
+            detail="Plate provider returned invalid JSON."
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Plate lookup failed: {type(exc).__name__}: {str(exc)[:200]}"
+        )
 
 
 @app.post("/upload-images", response_model=ModerationResponse)
@@ -155,12 +249,12 @@ async def upload_images(files: List[UploadFile] = File(...)):
             )
 
         contents = await file.read()
-        img = None  # EDIT ADDED: initialize img to None so finally block is safe
+        img = None
 
         try:
             img = Image.open(BytesIO(contents))
-            img.load()  # EDIT ADDED: force full decode now so BytesIO can be released
-            del contents  # EDIT ADDED: release raw bytes immediately after decode
+            img.load()
+            del contents
 
             classification = classifier(img)
 
@@ -169,7 +263,7 @@ async def upload_images(files: List[UploadFile] = File(...)):
                 None
             )
 
-            del classification  # EDIT ADDED: release classifier output after reading
+            del classification
 
             if nsfw_result and nsfw_result["score"] >= NSFW_THRESHOLD:
                 flagged.append(
@@ -181,7 +275,7 @@ async def upload_images(files: List[UploadFile] = File(...)):
                 )
 
         except HTTPException:
-            raise  # EDIT ADDED: let HTTP exceptions propagate normally
+            raise
 
         except Exception as exc:
             raise HTTPException(
@@ -191,10 +285,10 @@ async def upload_images(files: List[UploadFile] = File(...)):
 
         finally:
             if img is not None:
-                img.close()   # EDIT ADDED: explicitly close PIL image to free pixel buffer
-                del img       # EDIT ADDED: drop reference so GC can reclaim memory
+                img.close()
+                del img
 
-            gc.collect()      # EDIT ADDED: force GC after each image to prevent accumulation
+            gc.collect()
 
     blocked = len(flagged) > 0
 
@@ -265,7 +359,6 @@ Rules:
 
         raw_output = response.content[0].text.strip()
 
-        # Keep your existing JSON cleanup logic.
         fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_output)
 
         if fence_match:
@@ -279,8 +372,6 @@ Rules:
 
         parsed = json.loads(raw_output)
 
-        # Normalize Claude's output shape so the frontend always receives
-        # clean flat string arrays.
         normalized = {
             "code": str(parsed.get("code") or user_input),
             "summary": str(parsed.get("summary") or "").strip(),
